@@ -1,47 +1,40 @@
-import picocolors from 'picocolors';
-import { normalizeDomain } from '../normalize-domain';
-import { processLine } from '../process-line';
+import { fastNormalizeDomain, fastNormalizeDomainWithoutWww } from '../normalize-domain';
 import { onBlackFound } from './shared';
-import { fetchAssetsWithout304 } from '../fetch-assets';
+import { fetchAssets } from '../fetch-assets';
 import type { Span } from '../../trace';
 
-function domainListLineCb(l: string, set: string[], includeAllSubDomain: boolean, meta: string) {
-  const line = processLine(l);
-  if (!line) return;
-
+function domainListLineCb(line: string, set: string[], meta: string, normalizeDomain = fastNormalizeDomain) {
   const domain = normalizeDomain(line);
   if (!domain) return;
-  if (domain !== line) {
-    console.log(
-      picocolors.red('[process domain list]'),
-      picocolors.gray(`line: ${line}`),
-      picocolors.gray(`domain: ${domain}`),
-      picocolors.gray(meta)
-    );
-
-    return;
-  }
 
   onBlackFound(domain, meta);
 
-  set.push(includeAllSubDomain ? `.${line}` : line);
+  set.push(domain);
 }
 
-export function processDomainLists(
-  span: Span,
-  domainListsUrl: string, mirrors: string[] | null, includeAllSubDomain = false
-) {
-  return span.traceChildAsync(`process domainlist: ${domainListsUrl}`, async (span) => {
-    const text = await span.traceChildAsync('download', () => fetchAssetsWithout304(
-      domainListsUrl,
-      mirrors
-    ));
-    const domainSets: string[] = [];
-    const filterRules = text.split('\n');
+function domainListLineCbIncludeAllSubdomain(line: string, set: string[], meta: string, normalizeDomain = fastNormalizeDomain) {
+  const domain = normalizeDomain(line);
+  if (!domain) return;
 
-    span.traceChildSync('parse domain list', () => {
+  onBlackFound(domain, meta);
+
+  set.push('.' + domain);
+}
+export function processDomainListsWithPreload(
+  domainListsUrl: string, mirrors: string[] | null,
+  includeAllSubDomain = false,
+  allowEmptyRemote = false
+) {
+  const downloadPromise = fetchAssets(domainListsUrl, mirrors, true, allowEmptyRemote);
+  const lineCb = includeAllSubDomain ? domainListLineCbIncludeAllSubdomain : domainListLineCb;
+
+  return (span: Span) => span.traceChildAsync(`process domainlist: ${domainListsUrl}`, async (childSpan) => {
+    const filterRules = await childSpan.traceChildPromise('download', downloadPromise);
+    const domainSets: string[] = [];
+
+    childSpan.traceChildSync('parse domain list', () => {
       for (let i = 0, len = filterRules.length; i < len; i++) {
-        domainListLineCb(filterRules[i], domainSets, includeAllSubDomain, domainListsUrl);
+        lineCb(filterRules[i], domainSets, domainListsUrl, fastNormalizeDomainWithoutWww);
       }
     });
 

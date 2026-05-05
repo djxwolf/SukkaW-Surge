@@ -1,43 +1,73 @@
 import type { Span } from '../../trace';
-import { fetchAssetsWithout304 } from '../fetch-assets';
-import { normalizeDomain } from '../normalize-domain';
-import { processLine } from '../process-line';
+import { fetchAssets } from '../fetch-assets';
+import { fastNormalizeDomainWithoutWww } from '../normalize-domain';
 import { onBlackFound } from './shared';
 
-function hostsLineCb(l: string, set: string[], includeAllSubDomain: boolean, meta: string) {
-  const line = processLine(l);
-  if (!line) {
-    return;
-  }
+const rSpace = /\s+/;
 
-  const _domain = line.split(/\s/)[1]?.trim();
+function hostsLineCb(line: string, set: string[], meta: string) {
+  const _domain = line.split(rSpace, 3)[1];
   if (!_domain) {
     return;
   }
-  const domain = normalizeDomain(_domain);
+  const domain = fastNormalizeDomainWithoutWww(_domain.trim());
   if (!domain) {
     return;
   }
 
   onBlackFound(domain, meta);
 
-  set.push(includeAllSubDomain ? `.${domain}` : domain);
+  set.push(domain);
+}
+
+function hostsLineCbIncludeAllSubdomain(line: string, set: string[], meta: string) {
+  const _domain = line.split(rSpace, 3)[1];
+  if (!_domain) {
+    return;
+  }
+  const domain = fastNormalizeDomainWithoutWww(_domain.trim());
+  if (!domain) {
+    return;
+  }
+
+  onBlackFound(domain, meta);
+
+  set.push('.' + domain);
 }
 
 export function processHosts(
   span: Span,
   hostsUrl: string, mirrors: string[] | null, includeAllSubDomain = false
 ) {
+  const cb = includeAllSubDomain ? hostsLineCbIncludeAllSubdomain : hostsLineCb;
+
   return span.traceChildAsync(`process hosts: ${hostsUrl}`, async (span) => {
-    const text = await span.traceChild('download').traceAsyncFn(() => fetchAssetsWithout304(hostsUrl, mirrors));
+    const filterRules = await span.traceChild('download').traceAsyncFn(() => fetchAssets(hostsUrl, mirrors, true));
 
     const domainSets: string[] = [];
 
-    const filterRules = text.split('\n');
+    span.traceChild('parse hosts').traceSyncFn(() => {
+      for (let i = 0, len = filterRules.length; i < len; i++) {
+        cb(filterRules[i], domainSets, hostsUrl);
+      }
+    });
+
+    return domainSets;
+  });
+}
+
+export function processHostsWithPreload(hostsUrl: string, mirrors: string[] | null, includeAllSubDomain = false, allowEmptyRemote = false) {
+  const downloadPromise = fetchAssets(hostsUrl, mirrors, true, allowEmptyRemote);
+  const cb = includeAllSubDomain ? hostsLineCbIncludeAllSubdomain : hostsLineCb;
+
+  return (span: Span) => span.traceChildAsync(`process hosts: ${hostsUrl}`, async (span) => {
+    const filterRules = await span.traceChild('download').tracePromise(downloadPromise);
+
+    const domainSets: string[] = [];
 
     span.traceChild('parse hosts').traceSyncFn(() => {
       for (let i = 0, len = filterRules.length; i < len; i++) {
-        hostsLineCb(filterRules[i], domainSets, includeAllSubDomain, hostsUrl);
+        cb(filterRules[i], domainSets, hostsUrl);
       }
     });
 
