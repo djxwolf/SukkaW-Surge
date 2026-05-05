@@ -13,10 +13,11 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: master
+          fetch-depth: 0
 
       - name: Sync upstream
         run: |
           git remote add upstream https://github.com/SukkaW/Surge.git
           git fetch upstream
-          git merge upstream/master --no-edit
-          git push
+          git reset --hard upstream/master
+          git push --force
